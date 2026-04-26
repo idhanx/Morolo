@@ -1,5 +1,31 @@
-services:
+version: "3.9"
 
+services:
+  # PostgreSQL Database (OpenMetadata + Morolo)
+  postgresql:
+    container_name: openmetadata_postgresql
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    expose:
+      - 5432
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+    networks:
+      - open-meta-data_app_net
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d openmetadata_db" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # Redis Cache & Message Broker
   redis:
     image: redis:7-alpine
     container_name: redis
@@ -8,58 +34,183 @@ services:
       - redis_data:/data
     ports:
       - "6379:6379"
+    networks:
+      - open-meta-data_app_net
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping"]
+      test: [ "CMD-SHELL", "redis-cli ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Elasticsearch (OpenMetadata Search)
+  elasticsearch:
+    container_name: openmetadata_elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.2
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
     networks:
       - open-meta-data_app_net
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: "curl -s http://localhost:9200/_cluster/health?pretty | grep -q
+        'green\\|yellow' || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 10
 
+  # MinIO (S3-compatible Storage)
   minio:
     image: minio/minio:latest
     container_name: minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_SERVER_URL: "http://localhost:9000"
     volumes:
       - minio_data:/data
     ports:
       - "9000:9000"
       - "9001:9001"
+    networks:
+      - open-meta-data_app_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      test: [ "CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1" ]
       interval: 15s
       timeout: 10s
       retries: 5
+
+  # OpenMetadata Server
+  openmetadata_server:
+    container_name: openmetadata_server
+    image: docker.getcollate.io/openmetadata/server:1.3.3
+    restart: always
+    environment:
+      # Cluster
+      OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
+      SERVER_PORT: 8585
+      SERVER_ADMIN_PORT: 8586
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # Database
+      DB_DRIVER_CLASS: org.postgresql.Driver
+      DB_SCHEME: postgresql
+      DB_USE_SSL: false
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-password}
+      DB_HOST: postgresql
+      DB_PORT: 5432
+      DB_DATABASE: openmetadata_db
+
+      # Elasticsearch
+      ELASTICSEARCH_HOST: elasticsearch
+      ELASTICSEARCH_PORT: 9200
+      SEARCH_TYPE: elasticsearch
+
+      # Authorization
+      AUTHORIZER_CLASS_NAME: org.openmetadata.service.security.DefaultAuthorizer
+      AUTHORIZER_REQUEST_FILTER: org.openmetadata.service.security.JwtFilter
+      AUTHORIZER_ADMIN_PRINCIPALS: "[admin]"
+      AUTHORIZER_INGESTION_PRINCIPALS: "[ingestion-bot]"
+
+      # Authentication
+      AUTHENTICATION_PROVIDER: basic
+      AUTHENTICATION_PUBLIC_KEYS: "[http://localhost:8585/api/v1/system/config/jwks]"
+      AUTHENTICATION_ENABLE_SELF_SIGNUP: "true"
+
+      # JWT
+      JWT_ISSUER: http://localhost:8585
+      JWT_AUDIENCE: open-metadata
+    ports:
+      - "8585:8585"
+      - "8586:8586"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     networks:
       - open-meta-data_app_net
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8585/api/v1/health || exit 1" ]
+      interval: 30s
+      timeout: 15s
+      retries: 5
 
+  # Morolo Backend
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: backend
+    restart: unless-stopped
     volumes:
       - ./backend:/workspace/backend
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:password@openmetadata_postgresql:5432/openmetadata_db
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-password}@postgresql:5432/openmetadata_db
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_SECURE: "false"
       STORAGE_BACKEND: minio
       OM_HOST: http://openmetadata_server:8585
-      OM_TOKEN: ${OM_TOKEN}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-supersecretkey}
+      OM_TOKEN: ${OM_TOKEN:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret-key-in-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8000:8000"
     depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      openmetadata_server:
+        condition: service_healthy
+    networks:
+      - open-meta-data_app_net
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Celery Worker
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: celery_worker
+    command: [ "celery", "-A", "backend.tasks.celery_app", "worker", "--loglevel=info" ]
+    restart: unless-stopped
+    volumes:
+      - ./backend:/workspace/backend
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-password}@postgresql:5432/openmetadata_db
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_SECURE: "false"
+      STORAGE_BACKEND: minio
+      OM_HOST: http://openmetadata_server:8585
+      OM_TOKEN: ${OM_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgresql:
+        condition: service_healthy
       redis:
         condition: service_healthy
       minio:
@@ -67,37 +218,13 @@ services:
     networks:
       - open-meta-data_app_net
 
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: worker
-    command: ["celery", "-A", "backend.tasks.celery_app", "worker", "--loglevel=info"]
-    volumes:
-      - ./backend:/workspace/backend
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:password@openmetadata_postgresql:5432/openmetadata_db
-      REDIS_URL: redis://redis:6379/0
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_SECURE: "false"
-      STORAGE_BACKEND: minio
-      OM_HOST: http://openmetadata_server:8585
-      OM_TOKEN: ${OM_TOKEN}
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - open-meta-data_app_net
-
+  # Frontend
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: frontend
+    restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_OM_UI_URL: http://localhost:8585
@@ -107,6 +234,11 @@ services:
       - backend
     networks:
       - open-meta-data_app_net
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:3000 || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
 networks:
   open-meta-data_app_net:
@@ -114,5 +246,7 @@ networks:
     driver: bridge
 
 volumes:
+  postgresql_data:
   redis_data:
   minio_data:
+  elasticsearch_data:

@@ -7,16 +7,31 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- Create morolo role/user
-CREATE ROLE morolo WITH LOGIN PASSWORD 'morolo_password' CREATEDB;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_user WHERE usename = 'morolo') THEN
+    CREATE ROLE morolo WITH LOGIN PASSWORD 'morolo_password' CREATEDB;
+  END IF;
+END
+$$;
 
 -- Create OpenMetadata database if it doesn't exist
--- (OpenMetadata uses a separate DB from Morolo)
-SELECT 'CREATE DATABASE openmetadata_db'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'openmetadata_db')\gexec
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'openmetadata_db') THEN
+    CREATE DATABASE openmetadata_db;
+  END IF;
+END
+$$;
 
 -- Create Morolo database if it doesn't exist
-SELECT 'CREATE DATABASE morolo_db'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'morolo_db')\gexec
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'morolo_db') THEN
+    CREATE DATABASE morolo_db;
+  END IF;
+END
+$$;
 
 -- Grant privileges on openmetadata_db to morolo
 GRANT ALL PRIVILEGES ON DATABASE openmetadata_db TO morolo;
@@ -24,8 +39,9 @@ GRANT ALL PRIVILEGES ON DATABASE openmetadata_db TO morolo;
 -- Grant privileges on morolo_db to morolo
 GRANT ALL PRIVILEGES ON DATABASE morolo_db TO morolo;
 
--- Connect to morolo_db and create tables
-\c morolo_db;
+-- Connect to morolo_db for table creation (done via environment in docker-compose)
+-- Tables will be created by Alembic migrations when backend starts
+-- But we can create them here as fallback
 
 -- Create document_jobs table
 CREATE TABLE IF NOT EXISTS document_jobs (
@@ -58,12 +74,26 @@ CREATE TABLE IF NOT EXISTS pii_entities (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Create audit_logs table
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255),
+    action VARCHAR(50),
+    resource_type VARCHAR(50),
+    resource_id VARCHAR(255),
+    details TEXT,
+    ip_address VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_document_jobs_status ON document_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_document_jobs_risk_band ON document_jobs(risk_band);
 CREATE INDEX IF NOT EXISTS idx_document_jobs_created_at ON document_jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_pii_entities_job_id ON pii_entities(job_id);
 CREATE INDEX IF NOT EXISTS idx_pii_entities_entity_type ON pii_entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
 
 -- Grant all privileges to morolo user
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO morolo;

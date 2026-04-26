@@ -1,5 +1,5 @@
 # ─── Stage 1: Build Python dependencies ──────────────────────────────────────
-FROM python:3.11-slim AS builder
+FROM python:3.10-slim AS builder
 
 WORKDIR /app
 
@@ -25,13 +25,12 @@ RUN pip install --no-cache-dir --user \
 # Install OpenMetadata SDK WITHOUT its deps (avoids pydantic v1 conflict)
 RUN pip install --no-cache-dir --user --no-deps openmetadata-ingestion==1.3.3
 
-# Download spaCy model (required by Presidio NLP engine)
-# Install directly via pip to avoid spacy download URL resolution issues
+# Download spaCy model directly from wheel (3.10 compatible)
 RUN pip install --no-cache-dir --user \
-    "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl"
+    "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.4/en_core_web_sm-3.7.4-py3-none-any.whl"
 
 # ─── Stage 2: Runtime image ───────────────────────────────────────────────────
-FROM python:3.11-slim AS runtime
+FROM python:3.10-slim AS runtime
 
 # Create workspace: /workspace/backend/ will be the package
 WORKDIR /workspace
