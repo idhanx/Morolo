@@ -138,7 +138,7 @@ python create_classifications.py
 
 # Upload for analysis
 DOC_ID=$(curl -s -X POST "http://localhost:8000/upload" \
-  -F "file=@sample_document.txt" \
+  -F "file=@your_document.pdf" \
   -F "redaction_level=FULL" | grep -o '"doc_id":"[^"]*' | cut -d'"' -f4)
 
 # Check results
@@ -219,7 +219,7 @@ Parameters:
 Response (202 Accepted):
 {
   "doc_id": "8061241b-60a9-40f3-be4a-c406dcc7a785",
-  "filename": "test_document.pdf",
+  "filename": "document.pdf",
   "status": "PENDING",
   "message": "Document uploaded successfully"
 }
@@ -402,9 +402,11 @@ print('✅ OpenMetadata connected' if om._is_available() else '❌ OM unavailabl
 ### End-to-End Test
 
 ```bash
-# See END_TO_END_TEST_RESULTS.md for detailed test results
-python create_classifications.py  # Create test document
-curl -X POST "http://localhost:8000/upload" -F "file=@test.pdf"  # Upload
+# Run the application
+docker-compose up -d
+
+# Upload a document for testing
+curl -X POST "http://localhost:8000/upload" -F "file=@document.pdf"
 curl "http://localhost:8000/status/{doc_id}"  # Check results
 ```
 
@@ -661,7 +663,6 @@ open-meta-data/
 ├── docs/                         # Additional documentation
 │   └── samples/                  # Sample documents
 │
-├── END_TO_END_TEST_RESULTS.md    # Test results
 └── .gitignore                    # Git ignore patterns
 ```
 
@@ -718,11 +719,20 @@ MIT License - See [LICENSE](LICENSE) file for details
 
 For issues, questions, or feature requests:
 
-1. Check [END_TO_END_TEST_RESULTS.md](END_TO_END_TEST_RESULTS.md) for test results
-2. Review error logs: `docker-compose logs [service]`
-3. Check health: `curl http://localhost:8000/health`
-4. Create GitHub issue with detailed description
+1. Review error logs: `docker-compose logs [service]`
+2. Check health: `curl http://localhost:8000/health`
+3. Create GitHub issue with detailed description
 
 ---
 
-**Made with ❤️ for OpenMetadata Hackathon 2024**
+## 📄 License
+
+MIT License - See LICENSE file for details
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+---
+
+**Morolo** - Enterprise PII Governance for Indian Documents
