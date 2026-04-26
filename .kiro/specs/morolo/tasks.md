@@ -1,0 +1,406 @@
+# Implementation Plan: Morolo
+
+## Overview
+
+Build Morolo feature-by-feature in dependency order: project scaffolding first, then data models, then each processing service, then the API layer, then the task queue, then the frontend, and finally deployment configuration. Property-based tests (Hypothesis) are sub-tasks placed immediately after the component they validate so errors are caught early.
+
+## Tasks
+
+- [x] 1. Project scaffolding and repository structure
+  - Create top-level directory layout: `backend/`, `frontend/`, `docker/`, `tests/`, `docs/`
+  - Create `backend/` sub-packages: `api/`, `services/`, `models/`, `tasks/`, `core/`
+  - Create `backend/tests/` sub-directories: `unit/`, `integration/`, `performance/`
+  - Add `__init__.py` files to every backend package
+  - Create `backend/requirements.txt` with all pinned dependencies: fastapi, uvicorn, celery, redis, sqlalchemy, asyncpg, alembic, pydantic, presidio-analyzer, presidio-anonymizer, pdfminer.six, pdf2image, pytesseract, python-docx, boto3, openmetadata-ingestion, pybreaker, slowapi, hypothesis, pytest, pytest-asyncio, faker, python-jose, passlib
+  - Create `pyproject.toml` / `setup.cfg` with project metadata and tool config (pytest, mypy, ruff)
+  - Create `.env.example` listing all required environment variables (DATABASE_URL, REDIS_URL, MINIO_*, OM_HOST, OM_TOKEN, JWT_SECRET, NEXT_PUBLIC_API_URL)
+  - _Requirements: 11.1, 11.2, 11.3_
+
+- [x] 2. Core enumerations, Pydantic schemas, and configuration
+  - [x] 2.1 Implement enumerations and shared types in `backend/core/types.py`
+    - Define `JobStatus`, `RedactionLevel`, `RiskBand`, `ScanType`, `AuditAction` enums as `str, Enum` subclasses
+    - _Requirements: 3.1, 3.2, 3.3_
+  - [x] 2.2 Implement Pydantic API schemas in `backend/api/schemas.py`
+    - Define `UploadResponse`, `StatusResponse`, `RedactRequest`, `RiskScoreResponse`, `PIIEntitySchema`, `PIIInstanceRecord`, `RedactionMetadata`
+    - Ensure `RedactionMetadata` has all fields: `document_id`, `filename`, `redaction_level`, `timestamp`, `pii_instances`, `total_entities_redacted`, `risk_score_before`, `risk_score_after`
+    - _Requirements: 10.6, 12.1_
+  - [x] 2.3 Implement application settings in `backend/core/config.py`
+    - Use `pydantic-settings` `BaseSettings` to read all env vars with type validation
+    - Include `DATABASE_URL`, `REDIS_URL`, `MINIO_*`, `OM_HOST`, `OM_TOKEN`, `JWT_SECRET_KEY`, `MAX_FILE_SIZE_*`, `OCR_CHAR_THRESHOLD`
+    - _Requirements: 11.1_
+
+- [x] 3. Database layer — SQLAlchemy models and Alembic migrations
+  - [x] 3.1 Implement SQLAlchemy ORM models in `backend/models/db_models.py`
+    - Define `DocumentJob`, `PIIEntity`, `RedactionReport`, `AuditLog` tables with all columns, indexes, and FK constraints as specified in the design
+    - Use `UUID` primary keys, `JSONB` for `details`/`report_json`, `updated_at` auto-update trigger
+    - _Requirements: 10.7_
+  - [x] 3.2 Create async database session factory in `backend/core/database.py`
+    - Configure `asyncpg`-backed `AsyncEngine` and `AsyncSession` using `SQLAlchemy` async extension
+    - Implement `get_db()` dependency for FastAPI
+    - _Requirements: 10.7_
+  - [x] 3.3 Generate initial Alembic migration
+    - Run `alembic init` and configure `env.py` to use async engine and import all models
+    - Generate `versions/0001_initial_schema.py` migration creating all four tables
+    - _Requirements: 11.5_
+
+- [x] 4. Storage client — protocol + implementations
+  - Implement `StorageProtocol` interface in `backend/core/storage.py` with abstract methods: `upload_file(key, data, content_type)`, `download_file(key) -> bytes`, `generate_presigned_url(key, expiry_seconds)`
+  - Implement `MinIOStorageClient(StorageProtocol)` wrapping `boto3` S3-compatible client; reads endpoint, bucket, access key, secret key from settings
+  - Implement `LocalStorageClient(StorageProtocol)` writing to a configurable local directory; `generate_presigned_url` returns a `/files/{key}` path served by FastAPI static files
+  - Select implementation at startup based on `STORAGE_BACKEND` env var (`minio` or `local`, default `minio`)
+  - _Requirements: 10.7_
+
+- [x] 5. Redaction metadata parser and pretty printer
+  - [x] 5.1 Implement `RedactionMetadataParser` and `RedactionMetadataPrettyPrinter` in `backend/services/metadata_parser.py`
+    - `RedactionMetadataParser.parse(json_str: str) -> RedactionMetadata` — uses `RedactionMetadata.model_validate_json()`; raises `ValidationError` with descriptive message on invalid input
+    - `RedactionMetadataPrettyPrinter.pretty_print(metadata: RedactionMetadata) -> str` — uses `json.dumps(metadata.model_dump(mode="json"), indent=2, sort_keys=True)`; **do NOT use `model_dump_json(sort_keys=True)` — that parameter does not exist in Pydantic v2 and raises `TypeError`**; `model_dump(mode="json")` converts UUID/datetime/Enum to JSON-serializable primitives before `json.dumps` applies sorting
+    - _Requirements: 12.2, 12.3, 12.4_
+  - [ ]* 5.2 Write property test for RedactionMetadata round-trip (Property 15)
+    - **Property 15: RedactionMetadata round-trip**
+    - Implement `redaction_metadata_strategy()` in `backend/tests/conftest.py` using `st.builds(RedactionMetadata, ...)`
+    - Assert `RedactionMetadataParser.parse(RedactionMetadataPrettyPrinter.pretty_print(m)) == m` for all generated `m`
+    - Use `@settings(max_examples=500)`
+    - **Validates: Requirements 12.2, 12.5**
+  - [ ]* 5.3 Write property test for pretty-printer output format (Property 16)
+    - **Property 16: Pretty-printer output format consistency**
+    - Assert output is valid JSON, uses 2-space indentation, and all object keys are lexicographically sorted at every nesting level
+    - **Validates: Requirements 12.3, 12.6**
+  - [ ]* 5.4 Write unit tests for parser error handling
+    - Test malformed JSON, missing required fields, wrong field types, empty `pii_instances` list
+    - _Requirements: 12.4_
+
+- [x] 6. Document processor — text extraction service
+  - [x] 6.1 Implement `DocumentProcessor` in `backend/services/document_processor.py`
+    - `detect_scan_type(pdf_bytes: bytes) -> ScanType`: compute average chars/page; return `TEXT` if above threshold, `SCANNED` if below, `MIXED` if pages differ
+    - `extract_text(file_bytes: bytes, filename: str) -> ExtractedText`: dispatch to pdfminer (text PDF), pdf2image+pytesseract (scanned PDF), pytesseract direct (images), python-docx (DOCX)
+    - Cache result in Redis keyed by `sha256(file_bytes)` with 1-hour TTL
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
+  - [ ]* 6.2 Write property test for scan type detection (Property 13)
+    - **Property 13: Scan type detection correctness**
+    - Generate synthetic PDFs with known char/page ratios using `hypothesis` and `reportlab`/`fpdf2`; assert `detect_scan_type()` returns correct `ScanType`
+    - **Validates: Requirements 1.4**
+  - [ ]* 6.3 Write property test for text extraction content fidelity (Property 14)
+    - **Property 14: Text extraction content fidelity**
+    - Generate text-based PDFs and DOCX files containing known strings; assert all known strings appear in extracted output (modulo whitespace normalization)
+    - **Validates: Requirements 1.1, 1.3**
+  - [ ]* 6.4 Write unit tests for document processor edge cases
+    - Test corrupt PDF returns error, empty DOCX returns empty string, image with no text returns empty string
+    - _Requirements: 1.5_
+
+- [x] 7. PII detection engine with Presidio built-ins and custom DL recognizer
+  - [x] 7.1 Implement alias wrappers for Presidio built-in Indian ID recognizers in `backend/services/indian_id_recognizer.py`
+    - `AadhaarAliasRecognizer`: wraps Presidio's `InAadhaarRecognizer`; renames entity type `IN_AADHAAR` → `AADHAAR`; sets `subtype = "IndianGovtID"`; supports all three delimiter formats (plain, space, hyphen)
+    - `PANAliasRecognizer`: wraps Presidio's `InPanRecognizer`; renames `IN_PAN` → `PAN`; sets `subtype = "IndianGovtID"`
+    - Do NOT reimplement Aadhaar or PAN regex from scratch — use the built-in recognizers to avoid duplicate detection and score conflicts
+    - _Requirements: 2.1, 2.2_
+  - [x] 7.2 Implement `DrivingLicenseRecognizer` as a custom `PatternRecognizer` in `backend/services/indian_id_recognizer.py`
+    - Pattern: `\b[A-Z]{2}[0-9]{2}\s?[A-Z]{1,2}\s?[0-9]{4}\s?[0-9]{7}\b` (tightened from original — includes 4-digit year and 7-digit sequence)
+    - Context words: `["DL", "driving licence", "driving license", "license no", "licence no", "dl no"]` to boost confidence and reduce false positives from alphanumeric product codes
+    - Set `entity_type = "DRIVING_LICENSE"`, `subtype = "IndianGovtID"`
+    - Register all three recognizers with `RecognizerRegistry`
+    - _Requirements: 2.3_
+  - [x] 7.3 Implement `PIIDetector` in `backend/services/pii_detector.py`
+    - Initialize `AnalyzerEngine` with `AadhaarAliasRecognizer`, `PANAliasRecognizer`, `DrivingLicenseRecognizer` plus built-in recognizers for email, phone, person
+    - `detect(text: str, language: str = "en") -> PIIDetectionResult`: run analysis, filter by confidence threshold (default 0.7), return list of `PIIEntity`
+    - `_aggregate_by_type(entities) -> dict[str, list[PIIEntity]]`: group entities by type for risk scoring
+    - `calculate_risk_score(entities: list[PIIEntity]) -> float`: implement per-type weighted formula — `Σ_per_type(weight[type] × avg_confidence[type] × log(1 + count[type]) / log(2))`, capped at 100
+    - Derive `RiskBand` from score thresholds (0–25 LOW, 26–50 MEDIUM, 51–75 HIGH, 76–100 CRITICAL)
+    - _Requirements: 2.4, 2.5, 2.6_
+  - [ ]* 7.4 Write property test for Indian Govt ID detection correctness (Property 1)
+    - **Property 1: Indian Government ID detection correctness**
+    - Implement `aadhaar_strategy()` generating all 3 delimiter formats, `pan_strategy()`, `driving_license_strategy()` (pattern embedded in text with context word) in `conftest.py`
+    - Assert detector returns at least one entity with correct `entity_type` and `subtype == "IndianGovtID"` for every generated ID
+    - Use `@settings(max_examples=200)`
+    - **Validates: Requirements 2.1, 2.2, 2.3**
+  - [ ]* 7.5 Write property test for PII entity result structure completeness (Property 2)
+    - **Property 2: PII entity result structure completeness**
+    - Assert every entity has non-null `entity_type`, valid `start_offset`/`end_offset` within text bounds, and `confidence` in `[0.0, 1.0]`
+    - **Validates: Requirements 2.5**
+  - [ ]* 7.6 Write property test for risk score monotonicity (Property 3)
+    - **Property 3: Risk score monotonicity**
+    - Generate base entity list and one additional entity; assert `calculate_risk_score(base + [extra]) >= calculate_risk_score(base)`
+    - Both calls must use the same `_aggregate_by_type` logic — generate entities using `pii_entity_strategy()` that produces consistent type/offset data
+    - **Validates: Requirements 2.6**
+  - [ ]* 7.7 Write unit tests for PII detector
+    - Test empty text returns empty entity list, known Aadhaar/PAN/DL strings are detected, confidence threshold filtering works, no duplicate entities from alias + built-in recognizers
+    - _Requirements: 2.4, 2.5_
+
+- [x] 8. Checkpoint — core services verified
+  - Ensure all tests pass for tasks 5–7, ask the user if questions arise.
+
+- [x] 9. Redaction engine
+  - [x] 9.1 Implement `RedactionEngine` in `backend/services/redaction_engine.py`
+    - `redact(text: str, entities: list[PIIEntity], level: RedactionLevel) -> RedactionResult`
+    - LIGHT: preserve first 2 + last 2 chars, replace middle with `*`; for values shorter than 5 chars apply FULL behavior
+    - FULL: replace entire span with `[REDACTED]`
+    - SYNTHETIC: use `faker` with custom `IndianIDProvider` to generate format-matching fake values for Aadhaar, PAN, DL; use `faker` built-ins for email/phone/name
+    - Build audit mapping: `{sha256(original_value): redacted_value}` for every entity
+    - `generate_report(job_id: UUID, result: RedactionResult) -> RedactionReport`
+    - _Requirements: 3.1, 3.2, 3.3, 3.5, 3.6_
+  - [x] 9.2 Implement `IndianIDProvider` for `faker` in `backend/services/indian_id_provider.py`
+    - `aadhaar()`: generate random 12-digit number starting with 2–9, formatted with spaces
+    - `pan()`: generate random 5 uppercase letters + 4 digits + 1 uppercase letter
+    - `driving_license()`: generate random state-code + digits matching DL regex
+    - _Requirements: 3.3_
+  - [ ]* 9.3 Write property test for light redaction format preservation (Property 4)
+    - **Property 4: Light redaction format preservation**
+    - Generate PII entity values of length ≥ 5; assert output has same length, first 2 and last 2 chars unchanged, all middle chars are `*`
+    - **Validates: Requirements 3.1**
+  - [ ]* 9.4 Write property test for full redaction completeness (Property 5)
+    - **Property 5: Full redaction completeness — no PII in output**
+    - Implement `document_with_pii_strategy()` generating `(text, entities)` pairs; assert no original entity value appears as substring in redacted output
+    - Use `@settings(max_examples=500)`
+    - **Validates: Requirements 3.2**
+  - [ ]* 9.5 Write property test for synthetic redaction format preservation (Property 6)
+    - **Property 6: Synthetic redaction format preservation**
+    - For each Indian ID type, assert synthetic replacement matches the same regex pattern as the original type
+    - **Validates: Requirements 3.3**
+  - [ ]* 9.6 Write property test for redaction output completeness (Property 7)
+    - **Property 7: Redaction output always produces file and report**
+    - For any text, entity list, and redaction level, assert `redact()` returns non-empty `redacted_text` and non-empty `RedactionReport`
+    - **Validates: Requirements 3.5**
+  - [ ]* 9.7 Write property test for audit mapping completeness (Property 8)
+    - **Property 8: Audit mapping completeness**
+    - For N entities redacted in one operation, assert audit mapping contains exactly N entries keyed by SHA-256 hashes
+    - **Validates: Requirements 3.6**
+  - [ ]* 9.8 Write unit tests for redaction engine edge cases
+    - Test light redaction on 4-char value (boundary), overlapping entity offsets, empty entity list, synthetic value that matches another PII pattern
+    - _Requirements: 3.1, 3.2, 3.3_
+
+- [x] 10. OpenMetadata integration service
+  - [x] 10.1 Implement `OMIntegrationService` in `backend/services/om_integration.py`
+    - `ensure_storage_service()`: call `metadata.create_or_update(CreateStorageServiceRequest(name="morolo-docs", serviceType=StorageServiceType.CustomStorage, ...))` on startup; idempotent; verify minimum SDK version supports `StorageServiceType.CustomStorage` and raise a clear error if not
+    - `ensure_classification_hierarchy()`: create `PII > Sensitive > IndianGovtID > {Aadhaar, PAN, DrivingLicense}` tags; idempotent; check for existing tags before applying to avoid conflicts with OM's built-in auto-classification agent
+    - `build_container_entity(job, is_redacted) -> CreateContainerRequest`: set `parent` to `morolo-docs` service reference; set `fileFormats` (e.g., `["pdf"]`); leave `dataModel` null for unstructured files; add `riskScore` and `detectedPIITypes` as extension custom properties; FQN = `morolo-docs.{filename}`
+    - `create_container_entity(job, is_redacted) -> str`: call OM SDK `create_or_update`, return FQN
+    - `apply_tags(entity_fqn, pii_types)`: check existing tags first; map entity types to classification tag FQNs; call OM tag API only for tags not already present
+    - `build_lineage_edge(original_fqn, redacted_fqn, metadata) -> AddLineageRequest`: include `redactionLevel` and `timestamp` fields; include explicit `parent_container` service reference in both `fromEntity` and `toEntity` node objects to avoid `TypeError: _() missing 1 required keyword-only argument: 'parent_container'`
+    - `create_lineage_edge(original_fqn, redacted_fqn, metadata) -> str | None`: call OM `addLineage` API; catch `TypeError` and `Exception` from parent_container resolution; log error and return `None` on failure (lineage failure does not block processing)
+    - `register_pipeline_run(job, status)`: register Morolo using `pipelineType="application"` (NOT a custom type — the enum is strictly constrained); log run with `pipelineStatus` values: `queued`, `running`, `success`, `failed`, `partialSuccess`; manual UI triggering is not supported without Airflow
+    - `apply_policy(entity_fqn, policy_id)`: call OM Policy API
+    - Wrap all OM calls with `pybreaker` circuit breaker (fail_max=5, reset_timeout=60)
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 6.1, 6.2, 6.3, 6.5, 6.6, 7.1, 7.2, 7.3, 8.1, 8.2, 8.5, 8.6_
+  - [ ]* 10.2 Write property test for container entity metadata completeness (Property 9)
+    - **Property 9: Container entity metadata completeness**
+    - Generate `DocumentJob` fixtures with non-null `filename`, `file_size`, `created_at`, `risk_score`; assert `build_container_entity()` returns entity with non-null `name`, `size`, `uploadTimestamp`, `documentType`, `riskScore`, `detectedPIITypes`
+    - **Validates: Requirements 4.3, 4.5**
+  - [ ]* 10.3 Write property test for tag selection correctness (Property 10)
+    - **Property 10: Tag selection correctness**
+    - Generate lists of PII entity types; assert `apply_tags()` maps each type to the correct classification tag FQN with no spurious tags
+    - **Validates: Requirements 5.2, 5.3, 5.4, 5.6**
+  - [ ]* 10.4 Write property test for lineage edge metadata completeness (Property 11)
+    - **Property 11: Lineage edge metadata completeness**
+    - Generate lineage edge inputs; assert `build_lineage_edge()` output contains `redactionLevel` (one of LIGHT/FULL/SYNTHETIC) and valid UTC `timestamp` in addition to source/destination FQNs
+    - **Validates: Requirements 6.1, 6.2, 6.3**
+  - [ ]* 10.5 Write property test for lineage count invariant (Property 12)
+    - **Property 12: Lineage count invariant**
+    - Simulate K distinct redaction operations on the same document; assert exactly K lineage edges are created with no duplicates
+    - **Validates: Requirements 6.5**
+  - [ ]* 10.6 Write unit tests for OM integration service (mocked OM SDK)
+    - Test circuit breaker opens after 5 failures, classification hierarchy creation is idempotent, pipeline run logging records correct metadata
+    - _Requirements: 4.6, 5.5, 7.2, 8.1_
+
+- [x] 11. Checkpoint — processing services verified
+  - Ensure all tests pass for tasks 9–10, ask the user if questions arise.
+
+- [x] 12. Celery task queue setup
+  - [x] 12.1 Configure Celery application in `backend/tasks/celery_app.py`
+    - Initialize `Celery` with Redis broker and result backend from settings
+    - Configure task serializer (`json`), timezone (`UTC`), `acks_late=True`
+    - Define dead letter queue routing: failed tasks after max retries route to `morolo.dlq`
+    - _Requirements: 10.1_
+  - [x] 12.2 Implement `extract_text_task` in `backend/tasks/processing_tasks.py`
+    - Fetch file bytes from MinIO, call `DocumentProcessor.extract_text()`, cache result in Redis, enqueue `detect_pii_task`
+    - Retry policy: `max_retries=3`, exponential backoff with jitter
+    - Update `DocumentJob.status` to `EXTRACTING` on start, `PII_DETECTED` on success, `FAILED` on final failure
+    - _Requirements: 1.1, 1.2, 1.3, 1.4_
+  - [x] 12.3 Implement `detect_pii_task` in `backend/tasks/processing_tasks.py`
+    - Call `PIIDetector.detect()`, persist `PIIEntity` records to PostgreSQL, calculate and store `risk_score` and `risk_band` on `DocumentJob`
+    - Enqueue `ingest_to_openmetadata_task`; if redaction was requested, also enqueue `redact_document_task`
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
+  - [x] 12.4 Implement `redact_document_task` in `backend/tasks/processing_tasks.py`
+    - Fetch extracted text and `PIIEntity` records, call `RedactionEngine.redact()`, upload redacted content to MinIO, persist `RedactionReport`, enqueue `ingest_redacted_to_om_task`
+    - Update `DocumentJob.status` to `REDACTING` on start, `COMPLETED` on success
+    - _Requirements: 3.1, 3.2, 3.3, 3.5, 3.6_
+  - [x] 12.5 Implement `ingest_to_openmetadata_task` and `ingest_redacted_to_om_task` in `backend/tasks/om_tasks.py`
+    - Call `OMIntegrationService` methods in order: `ensure_classification_hierarchy`, `create_container_entity`, `apply_tags`, `register_pipeline_run`
+    - For redacted version: additionally call `create_lineage_edge`
+    - Handle `CircuitBreakerError` by re-queuing with 60-second delay
+    - _Requirements: 4.1, 4.2, 5.1, 6.1, 7.1, 7.2_
+  - [x] 12.6 Write `AuditLog` entries in `backend/tasks/audit.py`
+    - Implement `log_action(job_id, action, actor, details, ip_address)` called from every task on start and completion
+    - _Requirements: 3.6_
+
+- [x] 13. FastAPI backend — authentication and middleware
+  - [x] 13.1 Implement JWT authentication in `backend/api/auth.py`
+    - `create_access_token(subject: str) -> str` using `python-jose` with HS256
+    - `get_current_user(token: str) -> str` FastAPI dependency that validates token and returns subject
+    - _Requirements: 10.1_
+  - [x] 13.2 Implement file validation utilities in `backend/api/file_validation.py`
+    - `validate_file(upload_file: UploadFile) -> bytes`: check extension whitelist, read magic bytes, compare against `ALLOWED_MAGIC_BYTES`, check file size against `MAX_FILE_SIZES`
+    - Raise `HTTPException(400)` on magic byte mismatch, `HTTPException(415)` on unsupported type, `HTTPException(413)` on oversized file
+    - _Requirements: 10.1_
+  - [x] 13.3 Configure rate limiting in `backend/api/middleware.py`
+    - Add `slowapi` `Limiter` with per-IP token bucket: 10 uploads/min on `/upload`, 100 req/min on status endpoints
+    - Add `429` handler returning `Retry-After` header
+    - _Requirements: 10.1_
+
+- [x] 14. FastAPI backend — API endpoints
+  - [x] 14.1 Implement `POST /upload` endpoint in `backend/api/routes/upload.py`
+    - Accept `UploadFile` with chunked streaming, call `validate_file()`, compute SHA-256 hash, check for duplicate (return existing `doc_id` if hash matches), upload to MinIO, create `DocumentJob` in DB, enqueue `extract_text_task`, write `AuditLog`, return `202 UploadResponse`
+    - _Requirements: 10.1, 10.5, 10.6, 10.8_
+  - [x] 14.2 Implement `POST /redact` endpoint in `backend/api/routes/redact.py`
+    - Accept `RedactRequest`, validate `doc_id` exists and status is `PII_DETECTED` or `COMPLETED`, enqueue `redact_document_task`, return `202`
+    - _Requirements: 10.2, 10.5, 10.6_
+  - [x] 14.3 Implement `GET /status/{doc_id}` endpoint in `backend/api/routes/status.py`
+    - Query `DocumentJob` and associated `PIIEntity` records, return `StatusResponse` with `pii_summary` dict
+    - _Requirements: 10.3, 10.5_
+  - [x] 14.4 Implement `GET /risk-score/{doc_id}` endpoint in `backend/api/routes/risk.py`
+    - Query `DocumentJob` and `PIIEntity` records, return `RiskScoreResponse`
+    - _Requirements: 10.4, 10.5_
+  - [x] 14.5 Implement `GET /health` endpoint in `backend/api/routes/health.py`
+    - Check connectivity to PostgreSQL, Redis, MinIO, and OpenMetadata; return structured status for each dependency
+    - _Requirements: 11.4_
+  - [x] 14.6 Implement `GET /audit/{doc_id}` endpoint in `backend/api/routes/audit.py`
+    - Query `AuditLog` records for `job_id`, ordered by `timestamp` ascending, return list of `AuditLogResponse`
+    - Required by the `ActivityTimeline` frontend component
+    - _Requirements: 9.8_
+  - [x] 14.7 Wire all routes into `backend/main.py`
+    - Create `FastAPI` app, include all routers (upload, redact, status, risk, audit, health), add rate limiter middleware, add CORS middleware
+    - Add startup event: validate OM connectivity, call `OMIntegrationService.ensure_storage_service()` to register `morolo-docs` CustomStorage service, log connection status
+    - _Requirements: 10.1, 11.4_
+  - [ ]* 14.8 Write unit tests for API endpoints
+    - Use `httpx.AsyncClient` with `TestClient`; test upload with valid/invalid files, redact with unknown doc_id, status polling, audit log endpoint, health check with mocked dependencies
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.8_
+
+- [x] 15. Checkpoint — backend API verified
+  - Ensure all tests pass for tasks 12–14, ask the user if questions arise.
+
+- [x] 16. Next.js frontend — project setup and shared infrastructure
+  - [x] 16.1 Scaffold Next.js 14 app in `frontend/` using `create-next-app` with TypeScript, Tailwind CSS, App Router, and ESLint
+    - Install dependencies: `@tanstack/react-query`, `axios`, `zustand`, `framer-motion`, `reactflow`, `sonner`, `lucide-react`
+    - Install shadcn/ui and initialize with default theme: `npx shadcn-ui@latest init`
+    - Add shadcn/ui components: `card`, `button`, `badge`, `progress`, `skeleton`, `alert`, `radio-group`, `toast`
+    - Create `frontend/types/api.ts` mirroring all backend Pydantic schemas as TypeScript interfaces: `UploadResponse`, `StatusResponse`, `RedactRequest`, `RiskScoreResponse`, `PIIEntity`, `AuditLogResponse`, `JobStatus`, `RedactionLevel`, `RiskBand`
+    - _Requirements: 9.1_
+  - [x] 16.2 Implement API client and React Query setup in `frontend/lib/`
+    - Create `lib/api.ts`: Axios instance with `NEXT_PUBLIC_API_URL` base URL, JWT interceptor reading from `localStorage`, typed functions for all 5 endpoints (`uploadDocument`, `getDocumentStatus`, `getRiskScore`, `triggerRedaction`, `getAuditLog`)
+    - Create `lib/queries.ts`: React Query hooks — `useUploadMutation`, `useDocumentStatus` (polls every 3s, stops on terminal status), `useRiskScore` (enabled only when `PII_DETECTED`), `useRedactMutation`, `useAuditLog` (polls while non-terminal)
+    - Create `lib/store.ts`: Zustand store with `currentDocId` and `setCurrentDocId`
+    - Wrap `app/layout.tsx` with `QueryClientProvider`
+    - _Requirements: 9.2, 9.5, 9.9_
+
+- [x] 17. Next.js frontend — core UI components
+  - [x] 17.1 Implement `UploadDropzone` in `components/upload/UploadDropzone.tsx`
+    - Drag-and-drop zone with Framer Motion scale + border animation on drag-over
+    - Client-side validation: extension whitelist (`.pdf`, `.png`, `.jpg`, `.jpeg`, `.docx`), file size limits (PDF/DOCX ≤ 10MB, images ≤ 5MB), magic byte check (read first 4 bytes)
+    - On valid file: call `useUploadMutation`, navigate to `/dashboard/{docId}` on success
+    - On invalid file: `sonner` error toast, no submission
+    - _Requirements: 9.1, 9.10_
+  - [x] 17.2 Implement `StatusIndicator` in `components/shared/StatusIndicator.tsx`
+    - Five-step progress stepper: Upload → Extract → Detect → Redact → Complete
+    - Active step pulses with Framer Motion; completed steps show checkmark icon
+    - Failed state renders red X with error message in shadcn/ui `Tooltip`
+    - Maps `JobStatus` enum to step index
+    - _Requirements: 9.2_
+  - [x] 17.3 Implement `PIIHighlighter` in `components/document/PIIHighlighter.tsx`
+    - Accepts `text: string` and `entities: PIIEntity[]`
+    - Splits text into plain and PII segments using `start_offset`/`end_offset`
+    - Renders PII spans as `<mark>` with Tailwind color classes per entity type (Aadhaar=red, PAN=orange, DL=yellow, email=blue, phone=purple, person=green)
+    - Hover tooltip showing entity type, confidence, subtype
+    - Skeleton loader while `status < PII_DETECTED`
+    - _Requirements: 9.3_
+  - [x] 17.4 Implement `DocumentViewer` in `components/document/DocumentViewer.tsx`
+    - Wraps `PIIHighlighter` in a scrollable card with monospace font
+    - Shows character count and detected entity count in header
+    - _Requirements: 9.3_
+  - [x] 17.5 Implement `RiskScoreCard` in `components/risk/RiskScoreCard.tsx`
+    - shadcn/ui `Card` with animated score counter (Framer Motion `useSpring`)
+    - Color-coded `Badge` for risk band: LOW=green, MEDIUM=yellow, HIGH=orange, CRITICAL=red
+    - PII type breakdown using shadcn/ui `Progress` bars
+    - Skeleton loader while data is loading
+    - _Requirements: 9.4_
+  - [x] 17.6 Implement `RedactionControls` in `components/redaction/RedactionControls.tsx`
+    - shadcn/ui `RadioGroup` for Light / Full / Synthetic selection
+    - "Apply Redaction" button: calls `useRedactMutation`, disabled while status is `PENDING`, `EXTRACTING`, or `REDACTING`
+    - `sonner` toast on queue success and completion
+    - `AnimatePresence` (Framer Motion) for smooth reveal of download buttons on `COMPLETED`
+    - Download links for redacted document and report JSON (presigned URLs from status response)
+    - _Requirements: 9.5, 9.6_
+  - [x] 17.7 Implement `LineageGraph` in `components/lineage/LineageGraph.tsx`
+    - React Flow canvas with `OriginalDocNode` and `RedactedDocNode` custom node types
+    - Animated edge with label showing redaction level + timestamp
+    - Nodes display filename, risk band badge, OM entity FQN, external link to OM UI
+    - Zoom/pan controls + minimap
+    - Dynamically imported (`next/dynamic`, `ssr: false`) to avoid SSR issues with React Flow
+    - _Requirements: 9.7_
+  - [x] 17.8 Implement `ActivityTimeline` in `components/activity/ActivityTimeline.tsx`
+    - Vertical timeline sourced from `useAuditLog` hook
+    - Icon per `AuditAction` type (upload=upload icon, detect=search icon, redact=shield icon, ingest=database icon)
+    - Relative timestamp with absolute on hover (shadcn/ui `Tooltip`)
+    - Framer Motion `staggerChildren` on initial render
+    - _Requirements: 9.8_
+
+- [x] 18. Next.js frontend — pages and layout
+  - [x] 18.1 Implement landing page in `app/page.tsx`
+    - Server Component: hero section, feature highlights (PII detection, redaction levels, OM lineage), "Start Analyzing" CTA → `/dashboard`
+    - Framer Motion scroll-triggered animations on feature cards
+    - _Requirements: 9.1_
+  - [x] 18.2 Implement dashboard shell in `app/dashboard/page.tsx`
+    - Renders `UploadDropzone` centered; redirects to `/dashboard/{docId}` after upload
+    - _Requirements: 9.1_
+  - [x] 18.3 Implement document detail page in `app/dashboard/[docId]/page.tsx`
+    - Client Component: loads `useDocumentStatus`, `useRiskScore`, `useAuditLog`
+    - Responsive grid layout: `StatusIndicator` (full width), `DocumentViewer` + `PIIHighlighter` (left), `RiskScoreCard` + `RedactionControls` + `ActivityTimeline` (right), `LineageGraph` (full width bottom)
+    - Error boundary wrapping each section
+    - _Requirements: 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.8, 9.9_
+  - [ ]* 18.4 Write frontend unit tests
+    - Vitest + React Testing Library for `UploadDropzone` (validation logic), `PIIHighlighter` (span count + colors), `RedactionControls` (disabled states), `StatusIndicator` (step mapping)
+    - _Requirements: 9.1, 9.3, 9.4, 9.5_
+
+- [x] 19. Docker and deployment configuration
+  - [x] 19.1 Create `backend/Dockerfile`
+    - Multi-stage build: `python:3.11-slim` base, install system deps (tesseract-ocr, poppler-utils, libmagic), install Python deps, copy source, expose port 8000
+    - _Requirements: 11.5_
+  - [x] 19.2 Create `frontend/Dockerfile`
+    - Multi-stage Next.js standalone build: `node:20-alpine` builder stage runs `npm ci && npm run build`; runner stage copies `.next/standalone`, `.next/static`, `public`; exposes port 3000
+    - _Requirements: 11.5_
+  - [x] 19.3 Create `docker-compose.yml` in project root
+    - Services: `backend` (FastAPI, port 8000), `worker` (Celery), `frontend` (Next.js, port 3000), `postgres` (postgres:15), `redis` (redis:7-alpine), `minio` (minio/minio), `openmetadata` (openmetadata/server)
+    - `frontend` service sets `NEXT_PUBLIC_API_URL=http://backend:8000`
+    - Define volumes for postgres data, minio data
+    - Define health checks for postgres, redis, minio
+    - Wire environment variables from `.env` file
+    - _Requirements: 11.5_
+  - [x] 19.4 Create `docker/init-db.sql` with required PostgreSQL extensions (`uuid-ossp`, `pgcrypto`)
+    - _Requirements: 11.5_
+
+- [x] 20. Sample documents and test fixtures
+  - Create `docs/samples/` with: a text-based PDF containing Aadhaar/PAN/DL numbers, a scanned PDF (image-only), a DOCX with mixed PII, a PNG image with text
+  - Create `backend/tests/fixtures/` with JSON fixtures for `DocumentJob`, `PIIEntity`, `RedactionMetadata` used by unit tests
+  - _Requirements: 11.6_
+
+- [x] 21. README and documentation
+  - Create `README.md` with: project overview, architecture diagram reference, prerequisites (Docker, Node 20, Tesseract), quick-start with `docker-compose up`, environment variable reference table, API endpoint reference, running backend tests (`pytest backend/tests/unit`), running frontend tests (`npm test` in `frontend/`), sample workflow walkthrough
+  - _Requirements: 11.3_
+
+- [x] 22. Final checkpoint — full suite verified
+  - Ensure all unit, property-based, and frontend tests pass, ask the user if questions arise.
+
+## Notes
+
+- Tasks marked with `*` are optional and can be skipped for a faster MVP
+- Each task references specific requirements for traceability
+- Checkpoints at tasks 8, 11, 15, and 22 ensure incremental validation
+- Property tests (Hypothesis) validate universal correctness properties; unit tests validate specific examples and edge cases
+- All 16 correctness properties from the design document are covered: Properties 1–3 in task 7, Properties 4–8 in task 9, Properties 9–12 in task 10, Properties 13–14 in task 6, Properties 15–16 in task 5
+- **Fix 1 (StorageService)**: `ensure_storage_service()` in task 10.1 must run before any Container entity creation. All Container FQNs are `morolo-docs.{filename}`. Verify minimum `openmetadata-ingestion` SDK version supports `StorageServiceType.CustomStorage` before pinning in `requirements.txt`
+- **Fix 2 (Pipeline type)**: Use `pipelineType="application"` — there is no custom type in the OM enum. Manual UI triggering requires direct API calls; Airflow is not a dependency
+- **Fix 3 (Pretty printer)**: Use `json.dumps(metadata.model_dump(mode="json"), indent=2, sort_keys=True)` — `model_dump_json(sort_keys=True)` does not exist in Pydantic v2 and raises `TypeError`
+- **Fix 4 (Recognizers)**: Use Presidio's built-in `InAadhaarRecognizer` and `InPanRecognizer` via alias wrappers (tasks 7.1–7.2). Only `DrivingLicenseRecognizer` is custom-built. The tightened DL regex with context words reduces false positives from alphanumeric product codes
+- **Fix 5 (Lineage)**: `build_lineage_edge()` must include explicit `parent_container` service reference in both entity nodes. `create_lineage_edge()` catches `TypeError` from parent_container resolution and returns `None` on failure — lineage failure does not block processing
+- **Fix 6 (Audit endpoint)**: `GET /audit/{doc_id}` is implemented in task 14.6 alongside other FastAPI routes — not during frontend development. Frontend tasks (16–18) depend on the complete backend (tasks 13–14)
+- The `IndianIDProvider` for `faker` (task 9.2) must be implemented before property tests for synthetic redaction (task 9.5)
+- OpenMetadata integration tasks (10, 12.5) depend on the circuit breaker being configured first (task 10.1)
+- The `LocalStorageClient` (task 4) enables development without MinIO; switch to `MinIOStorageClient` via `STORAGE_BACKEND=minio` env var for production
+- The `LineageGraph` component (task 17.7) uses `next/dynamic` with `ssr: false` to avoid React Flow SSR issues

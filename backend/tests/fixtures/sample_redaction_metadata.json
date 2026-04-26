@@ -1,0 +1,27 @@
+{
+    "document_id": "550e8400-e29b-41d4-a716-446655440001",
+    "filename": "aadhaar_sample.pdf",
+    "redaction_level": "FULL",
+    "timestamp": "2026-04-18T10:05:00Z",
+    "pii_instances": [
+        {
+            "entity_type": "AADHAAR",
+            "original_value": "",
+            "redacted_value": "[REDACTED]",
+            "start_offset": 55,
+            "end_offset": 70,
+            "confidence": 0.95
+        },
+        {
+            "entity_type": "PAN",
+            "original_value": "",
+            "redacted_value": "[REDACTED]",
+            "start_offset": 76,
+            "end_offset": 86,
+            "confidence": 0.92
+        }
+    ],
+    "total_entities_redacted": 4,
+    "risk_score_before": 78.5,
+    "risk_score_after": 0.0
+}

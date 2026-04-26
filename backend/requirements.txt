@@ -1,0 +1,53 @@
+# Core Framework
+fastapi==0.109.2
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# Async & Task Queue
+celery==5.3.6
+redis==5.0.4
+
+# Database
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# PII Detection & Redaction
+presidio-analyzer==2.2.354
+presidio-anonymizer==2.2.354
+spacy==3.7.4
+
+# Document Processing
+pdfminer.six==20231228
+pdf2image==1.17.0
+reportlab==4.2.5
+pytesseract==0.3.10
+python-docx==1.1.0
+Pillow==10.3.0
+
+# Storage
+minio==7.2.7
+
+# Resilience & Rate Limiting
+pybreaker==1.0.2
+slowapi==0.1.9
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.9
+
+# HTTP client (for health checks)
+httpx==0.27.0
+
+# Utilities
+python-magic==0.4.27
+faker==24.9.0
+
+# Testing (kept for pytest runs inside container)
+pytest==7.4.4
+pytest-asyncio==0.23.6
+pytest-cov==4.1.0
+hypothesis==6.100.0
