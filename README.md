@@ -1,98 +1,31 @@
-# 🔐 Morolo — Enterprise PII Governance for OpenMetadata
+# 🔐 Morolo — PII Governance for Indian Documents
 
-> **Detect • Redact • Govern • Query**
->
-> Complete end-to-end PII governance system for unstructured Indian documents with OpenMetadata integration and AI-agent access via Model Context Protocol (MCP).
+> Automated PII detection and redaction system for Indian Government IDs with OpenMetadata integration
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
-[![Docker](https://img.shields.io/badge/Docker-20.10+-blue)](https://www.docker.com/)
 [![OpenMetadata 1.3.3](https://img.shields.io/badge/OpenMetadata-1.3.3-blue)](https://www.open-metadata.org/)
 
 ---
 
-## 📋 Table of Contents
+## 📋 Overview
 
-- [Overview](#overview)
-- [Key Features](#key-features)
-- [Quick Start](#quick-start)
-- [Architecture](#architecture)
-- [API Reference](#api-reference)
-- [Deployment](#deployment)
-- [Testing](#testing)
-- [Troubleshooting](#troubleshooting)
-- [Security](#security)
-- [FAQ](#faq)
+Morolo is a PII governance system designed to detect and redact sensitive information from Indian documents. It integrates with OpenMetadata for metadata management and provides risk scoring for compliance purposes.
 
----
+### What It Does
 
-## 🎯 Overview
+- Detects Indian Government IDs (Aadhaar, PAN, Driving License) plus email and phone numbers
+- Calculates risk scores based on detected PII types
+- Integrates with OpenMetadata for metadata tracking
+- Provides document redaction capabilities
+- Offers REST API for document processing
 
-### Problem Statement
+### What It Doesn't Do
 
-Indian enterprises lack a unified system to automatically detect unstructured PII (Aadhaar, PAN, Driving License) in user-uploaded documents, calculate compliance risk, redact sensitive information, and enable AI agents to query governance rules safely.
-
-### Our Solution
-
-Morolo provides:
-
-✅ **Automated Detection**: 5 Indian Government ID types + email/phone/names (95%+ accuracy)  
-✅ **Risk Scoring**: 0-100 scale with CRITICAL alerts for KYC bundles  
-✅ **Metadata Governance**: OpenMetadata integration with classifications & lineage  
-✅ **AI-Agent Ready**: MCP interface for Claude/ChatGPT governance queries  
-✅ **Multiple Redaction**: Light/Full/Synthetic modes with realistic fake Indian IDs  
-✅ **DPDP Compliance**: Automatic policy enforcement & audit trail  
-
----
-
-## ✨ Key Features
-
-### 1. PII Detection
-
-- **5 Government ID Types**: Aadhaar, PAN, Driving License, Email, Phone
-- **High Confidence**: 95%+ accuracy with Presidio + custom recognizers
-- **Multi-format Support**: PDF (text & scanned), DOCX, PNG, JPG
-
-### 2. Risk Scoring Formula
-
-```
-risk_score = base_score × diversity_multiplier × aadhaar_boost + combination_boosts
-
-Risk Bands:
-- LOW (<5): Email/Phone only
-- MEDIUM (5-15): Single government ID or multiple non-critical
-- HIGH (15-30): Single government ID detected
-- CRITICAL (≥30): Multiple government IDs or KYC bundle
-```
-
-### 3. OpenMetadata Integration
-
-- Container entities with custom properties
-- Hierarchical classifications (MoroloPII.Sensitive.IndianGovtID.Aadhaar)
-- Lineage tracking: Original → Redacted documents
-- Ingestion pipeline: `morolo-pii-redaction-pipeline`
-
-### 4. Redaction Modes
-
-| Mode | Behavior | Use Case |
-|------|----------|----------|
-| **Light** | Redact only CRITICAL PII (Aadhaar) | Data analysis with PII visible |
-| **Full** | Redact all PII | Compliance & legal holds |
-| **Synthetic** | Replace with realistic fake data | ML training, testing |
-| **None** | Keep original (audit only) | Internal review |
-
-### 5. AI-Agent Interface (MCP)
-
-```python
-# Tool 1: Get document risk
-get_document_risk_score(doc_id: str) → {risk_score, risk_band, pii_breakdown}
-
-# Tool 2: List PII entities
-list_pii_entities(doc_id: str) → [{entity_type, start, end, confidence}]
-
-# Tool 3: Query by risk
-query_pii_documents(risk_band: "CRITICAL") → [{doc_id, filename, risk_score}]
-```
+- This is a proof-of-concept/hackathon project, not production-ready
+- Detection accuracy varies based on document quality
+- No real-time processing (uses async task queue)
+- Limited to text-based documents (OCR quality dependent)
 
 ---
 
@@ -101,106 +34,103 @@ query_pii_documents(risk_band: "CRITICAL") → [{doc_id, filename, risk_score}]
 ### Prerequisites
 
 ```bash
-# Check requirements
 docker --version        # 20.10+
 docker-compose --version  # 2.0+
-git --version            # Latest
 ```
 
-### 1. Clone & Setup
+### 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/open-meta-data.git
-cd open-meta-data
+git clone https://github.com/idhanx/Morolo.git
+cd Morolo
+```
 
-# Copy environment template
+### 2. Configure Environment
+
+```bash
 cp .env.example .env
+# Edit .env and set:
+# - OM_TOKEN (get from OpenMetadata UI)
+# - JWT_SECRET_KEY (generate with: openssl rand -hex 32)
 ```
 
-### 2. Start Services
+### 3. Start Services
 
 ```bash
-# One-command startup
-chmod +x setup.sh
-./setup.sh
+# Start OpenMetadata infrastructure first
+docker-compose -f docker-compose-postgres.yml up -d
 
-# Or manual
+# Wait for services to be healthy (~60 seconds)
+sleep 60
+
+# Start application services
 docker-compose up -d
-sleep 60  # Wait for services to be healthy
+
+# Check status
 docker-compose ps
 ```
 
-### 3. Test PII Detection
+### 4. Test the System
 
 ```bash
-# Create test PDF with PII
-python create_classifications.py
+# Check health
+curl http://localhost:8000/health
 
-# Upload for analysis
-DOC_ID=$(curl -s -X POST "http://localhost:8000/upload" \
+# Upload a document (you'll need a PDF with PII)
+curl -X POST "http://localhost:8000/upload" \
   -F "file=@your_document.pdf" \
-  -F "redaction_level=FULL" | grep -o '"doc_id":"[^"]*' | cut -d'"' -f4)
+  -F "redaction_level=FULL"
 
-# Check results
-curl "http://localhost:8000/status/$DOC_ID" | jq .
-
-# Expected response:
-# {
-#   "status": "PII_DETECTED",
-#   "risk_band": "CRITICAL",
-#   "risk_score": 100.0,
-#   "pii_summary": {"AADHAAR": 1, "PAN": 1, "EMAIL": 2}
-# }
+# Check status (replace {doc_id} with response from upload)
+curl "http://localhost:8000/status/{doc_id}"
 ```
 
-### 4. Access Services
+### 5. Access Services
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| **FastAPI Docs** | http://localhost:8000/docs | None |
-| **OpenMetadata** | http://localhost:8585 | admin / admin |
-| **MinIO Console** | http://localhost:9001 | minioadmin / minioadmin |
-| **Frontend** | http://localhost:3000 | None |
+| FastAPI Docs | http://localhost:8000/docs | None |
+| OpenMetadata | http://localhost:8585 | admin / admin |
+| MinIO Console | http://localhost:9001 | minioadmin / minioadmin |
 
 ---
 
 ## 🏗️ Architecture
 
-### System Layers
+### Components
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ LAYER 1: INGESTION & PROCESSING                     │
-│ Upload (FastAPI) → OCR (Tesseract) → PII Detection  │
-├─────────────────────────────────────────────────────┤
-│ LAYER 2: RISK & GOVERNANCE                          │
-│ Risk Scoring → OpenMetadata → Classifications       │
-├─────────────────────────────────────────────────────┤
-│ LAYER 3: ASYNC PROCESSING                           │
-│ Celery Tasks → Redaction → MinIO Storage            │
-├─────────────────────────────────────────────────────┤
-│ LAYER 4: AI-AGENT INTERFACE                         │
-│ MCP Server (3 Tools for Claude/ChatGPT)             │
-└─────────────────────────────────────────────────────┘
-
-Supporting Services:
-PostgreSQL | Redis | MinIO | OpenMetadata | RabbitMQ
+┌─────────────────────────────────────────┐
+│ FastAPI Backend                          │
+│ - Document upload                        │
+│ - PII detection (Presidio)               │
+│ - Risk scoring                           │
+└─────────────────────────────────────────┘
+                  ↓
+┌─────────────────────────────────────────┐
+│ Celery Worker                            │
+│ - Async document processing              │
+│ - Redaction                              │
+│ - OpenMetadata integration               │
+└─────────────────────────────────────────┘
+                  ↓
+┌─────────────────────────────────────────┐
+│ Storage & Metadata                       │
+│ - PostgreSQL (metadata)                  │
+│ - MinIO (documents)                      │
+│ - OpenMetadata (governance)              │
+└─────────────────────────────────────────┘
 ```
 
 ### Technology Stack
 
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| Backend | FastAPI | REST API, async requests |
-| PII Detection | Presidio | Entity recognition |
-| Custom IDs | Regex + Presidio | Indian Government IDs |
-| Redaction | Presidio + Faker | Entity replacement |
-| Async Tasks | Celery + Redis | Background processing |
-| Storage | MinIO (S3-compatible) | Document storage |
-| Database | PostgreSQL | Metadata & audit logs |
-| Governance | OpenMetadata | Metadata catalog, lineage |
-| AI Interface | MCP Server | Claude/ChatGPT integration |
-| Frontend | Next.js + React | Document upload UI |
+- **Backend**: FastAPI (Python)
+- **PII Detection**: Microsoft Presidio with custom recognizers
+- **Task Queue**: Celery + Redis
+- **Database**: PostgreSQL
+- **Storage**: MinIO (S3-compatible)
+- **Metadata**: OpenMetadata 1.3.3
+- **Frontend**: Next.js (basic UI)
 
 ---
 
@@ -213,15 +143,14 @@ POST /upload
 Content-Type: multipart/form-data
 
 Parameters:
-- file: PDF/DOCX/PNG/JPG (required)
-- redaction_level: LIGHT|FULL|SYNTHETIC|NONE (default: FULL)
+- file: PDF/DOCX/PNG/JPG (max 10MB)
+- redaction_level: LIGHT|FULL|SYNTHETIC|NONE
 
-Response (202 Accepted):
+Response:
 {
-  "doc_id": "8061241b-60a9-40f3-be4a-c406dcc7a785",
+  "doc_id": "uuid",
   "filename": "document.pdf",
-  "status": "PENDING",
-  "message": "Document uploaded successfully"
+  "status": "PENDING"
 }
 ```
 
@@ -232,496 +161,240 @@ GET /status/{doc_id}
 
 Response:
 {
-  "doc_id": "8061241b-60a9-40f3-be4a-c406dcc7a785",
+  "doc_id": "uuid",
   "status": "PII_DETECTED",
-  "risk_score": 100.0,
-  "risk_band": "CRITICAL",
+  "risk_score": 85.0,
+  "risk_band": "HIGH",
   "pii_summary": {
     "AADHAAR": 1,
-    "PAN": 1,
     "EMAIL": 2
   }
 }
 ```
 
-### Get Risk Analysis
+### Get Risk Score
 
 ```bash
 GET /risk/{doc_id}
 
 Response:
 {
-  "risk_score": 100.0,
-  "risk_band": "CRITICAL",
-  "confidence": 0.95,
-  "entity_breakdown": {
-    "AADHAAR": {"count": 1, "avg_confidence": 1.0, "weight": 25.0}
-  }
+  "risk_score": 85.0,
+  "risk_band": "HIGH",
+  "entity_breakdown": {...}
 }
 ```
 
 ### Download Documents
 
 ```bash
-# Original
+# Original document
 GET /documents/{doc_id}/download?format=original
 
-# Redacted
+# Redacted document
 GET /documents/{doc_id}/download?format=redacted
 ```
 
-### Health Check
+---
 
-```bash
-GET /health
+## 🔍 PII Detection
 
-Response:
-{
-  "status": "healthy",
-  "dependencies": {
-    "postgres": {"status": "healthy"},
-    "redis": {"status": "healthy"},
-    "minio": {"status": "healthy"},
-    "openmetadata": {"status": "healthy"}
-  }
-}
-```
+### Supported Entity Types
+
+| Entity Type | Detection Method | Notes |
+|-------------|------------------|-------|
+| Aadhaar | Regex pattern | 12-digit format (spaced/hyphenated) |
+| PAN | Regex pattern | 10-character alphanumeric |
+| Driving License | Regex pattern | State-based format |
+| Email | Presidio built-in | Standard email detection |
+| Phone | Presidio built-in | Indian phone formats |
+
+### Risk Scoring
+
+Risk scores are calculated based on:
+- Type of PII detected (Aadhaar has highest weight)
+- Number of entities found
+- Diversity of PII types
+- Confidence scores
+
+**Risk Bands:**
+- LOW (<5): Minimal PII
+- MEDIUM (5-15): Some PII detected
+- HIGH (15-30): Government ID detected
+- CRITICAL (≥30): Multiple government IDs
 
 ---
 
-## 📦 Deployment
+## 🔗 OpenMetadata Integration
 
-### Local Development
+### What's Integrated
 
-```bash
-# One-command setup
-./setup.sh
+- **Container Entities**: Documents are registered as Container entities
+- **Custom Properties**: Risk score, risk band, detected PII types
+- **Classifications**: Hierarchical PII classifications (when working)
+- **Lineage**: Tracks original → redacted transformation
 
-# Check services
-docker-compose ps
+### Known Limitations
 
-# View logs
-docker-compose logs -f backend
-```
-
-### Docker Compose (Single Server)
-
-```bash
-# Configure production environment
-cp .env.example .env
-# Edit .env with production values:
-# - JWT_SECRET_KEY: Generate with `openssl rand -hex 32`
-# - OM_TOKEN: Valid OpenMetadata bearer token
-# - DB credentials: Strong passwords
-# - MINIO credentials: Strong keys
-
-# Start services
-docker-compose up -d
-
-# Monitor
-docker-compose logs -f
-docker-compose ps
-```
-
-### Kubernetes Deployment
-
-```yaml
-# For production K8s, use Helm charts or kubectl manifests
-# Recommended setup:
-# - Use managed databases (RDS, Azure Database)
-# - Use managed object storage (S3, Azure Blob)
-# - Configure ingress for TLS
-# - Set up pod autoscaling
-# - Enable monitoring and alerting
-```
-
-### Pre-Deployment Checklist
-
-**Security:**
-- ✅ Change all default credentials
-- ✅ Generate strong JWT_SECRET_KEY
-- ✅ Set OM_TOKEN from actual OpenMetadata instance
-- ✅ Enable SSL/TLS for all connections
-- ✅ Disable DEBUG mode
-- ✅ Configure firewall rules
-
-**Infrastructure:**
-- ✅ Database backups configured
-- ✅ Log aggregation set up
-- ✅ Monitoring and alerting enabled
-- ✅ Resource limits defined
-
-**Configuration:**
-- ✅ Review all environment variables
-- ✅ Set appropriate rate limits
-- ✅ Configure file upload limits
-- ✅ Set log levels appropriately
-
----
-
-## ✅ Testing
-
-### Unit Tests
-
-```bash
-# Run all tests
-pytest backend/tests/ -v
-
-# With coverage
-pytest backend/tests/ --cov=backend --cov-report=html
-
-# Specific test file
-pytest backend/tests/unit/test_pii_detector.py -v
-```
-
-### Integration Tests
-
-```bash
-# Database connectivity
-docker-compose exec backend python -c "
-from backend.core.database import get_db_engine
-engine = get_db_engine()
-print('✅ Database connected')
-"
-
-# MinIO connectivity
-docker-compose exec backend python -c "
-from backend.core.storage import get_storage_client
-client = get_storage_client()
-print('✅ MinIO connected')
-"
-
-# OpenMetadata connectivity
-docker-compose exec backend python -c "
-from backend.services.om_integration import OMIntegrationService
-om = OMIntegrationService()
-print('✅ OpenMetadata connected' if om._is_available() else '❌ OM unavailable')
-"
-```
-
-### End-to-End Test
-
-```bash
-# Run the application
-docker-compose up -d
-
-# Upload a document for testing
-curl -X POST "http://localhost:8000/upload" -F "file=@document.pdf"
-curl "http://localhost:8000/status/{doc_id}"  # Check results
-```
+- Classification tagging via API has compatibility issues with OM v1.3.3
+- Manual tagging in OM UI works as workaround
+- Lineage tracking is basic (no complex transformations)
 
 ---
 
 ## 🔧 Troubleshooting
 
-### Port Already in Use
-
-```bash
-# Find process using port
-lsof -i :8000  # FastAPI
-lsof -i :8585  # OpenMetadata
-lsof -i :5432  # PostgreSQL
-
-# Kill process or change port in docker-compose.yml
-```
-
 ### Services Won't Start
 
 ```bash
-# Check Docker daemon
+# Check Docker is running
 docker ps
 
-# Check logs
-docker-compose logs --tail=100
-
-# Full restart
-docker-compose down -v
-docker-compose up -d
-```
-
-### Database Connection Error
-
-```bash
-# Wait for PostgreSQL to initialize
-sleep 30
-docker-compose restart backend
-
-# Check connection string in .env
-# Should be: postgresql+asyncpg://postgres:password@postgresql:5432/openmetadata_db
-```
-
-### Backend Not Healthy
-
-```bash
-# Check health endpoint
-curl http://localhost:8000/health
-
-# View detailed logs
+# View logs
 docker-compose logs backend
+docker-compose logs -f celery_worker
 
-# Rebuild if needed
-docker-compose build backend
-docker-compose up -d backend
-```
-
-### PII Detection Not Working
-
-```bash
-# Verify Tesseract installed
-docker-compose exec backend tesseract --version
-
-# Check OCR quality
-# Try with higher DPI PDFs (300+ DPI for scans)
-
-# Verify confidence threshold
-# Default: PII_CONFIDENCE_THRESHOLD=0.7 in .env
-```
-
-### Task Queue Issues
-
-```bash
-# Check worker health
-docker-compose ps celery_worker
-
-# View worker logs
-docker-compose logs celery_worker
-
-# Restart worker
-docker-compose restart celery_worker
-
-# Verify Redis connectivity
-docker-compose exec redis redis-cli ping
-```
-
-### Common Commands
-
-```bash
-# Full restart (lose data)
-docker-compose down -v
-docker system prune -af
+# Restart everything
+docker-compose down
+docker-compose -f docker-compose-postgres.yml down
+docker-compose -f docker-compose-postgres.yml up -d
+sleep 60
 docker-compose up -d
-
-# Restart specific service
-docker-compose restart backend
-
-# View service logs
-docker-compose logs -f [service_name]
-
-# Execute command in container
-docker-compose exec backend bash
 ```
+
+### Network Errors
+
+The docker-compose files use a shared network. Make sure:
+1. Start `docker-compose-postgres.yml` first
+2. Wait for services to be healthy
+3. Then start `docker-compose.yml`
+
+### PII Not Detected
+
+- Ensure document has clear text (not scanned images)
+- For scanned PDFs, OCR quality matters (300+ DPI recommended)
+- Check confidence threshold in `.env` (default: 0.7)
+
+### OpenMetadata Connection Failed
+
+- Verify OM_TOKEN is set correctly in `.env`
+- Check OpenMetadata is running: `curl http://localhost:8585/api/v1/health-check`
+- System will work without OM (graceful degradation)
 
 ---
 
-## 🔒 Security
+## ⚠️ Known Issues & Limitations
 
-### Credentials Management
+### Current Limitations
 
-**Do NOT commit credentials to git:**
-- `.env` is in `.gitignore` - never commit
-- Use `.env.example` for reference only
-- Set production secrets via environment variables
-- Rotate tokens regularly
+1. **Not Production Ready**: This is a hackathon/proof-of-concept project
+2. **No Authentication**: API endpoints are open (add auth for production)
+3. **Limited Error Handling**: Some edge cases not covered
+4. **OCR Quality**: Depends on Tesseract, may miss text in poor scans
+5. **Classification Tagging**: API compatibility issue with OM v1.3.3
+6. **No Real-time Updates**: Uses polling, not WebSockets
+7. **Single Server**: Not designed for horizontal scaling
+8. **Basic Frontend**: Minimal UI, needs improvement
 
-### Production Security
+### Security Considerations
 
-**Required:**
-- Enable SSL/TLS for all connections
-- Use strong, unique credentials for each service
-- Implement network segmentation
-- Enable audit logging
-- Restrict API access with authentication
-- Use VPN for admin access
-- Regular security updates
+- Default credentials in `.env.example` are for development only
+- No rate limiting on API endpoints
+- No input validation for file types
+- No virus scanning on uploads
+- Audit logging is basic
 
-**Configuration:**
+### Performance Notes
+
+- Document processing is async (10-30 seconds typical)
+- Large documents (>5MB) may timeout
+- Concurrent uploads limited by Celery worker count
+- No caching implemented
+
+---
+
+## 📦 Deployment
+
+### Development Only
+
+This project is configured for local development. For production deployment, you would need:
+
+- Proper authentication and authorization
+- SSL/TLS certificates
+- Managed databases (not Docker containers)
+- Load balancing
+- Monitoring and alerting
+- Backup and disaster recovery
+- Security hardening
+- Rate limiting
+- Input validation
+- Virus scanning
+
+---
+
+## 🧪 Testing
+
+### Manual Testing
+
 ```bash
-# Generate strong JWT secret
-openssl rand -hex 32
+# Run unit tests
+docker-compose exec backend pytest backend/tests/unit/ -v
 
-# Enable HTTPS
-MINIO_SECURE=true
-USE_HTTPS=true
-
-# Disable debug mode
-DEBUG=false
+# Check specific component
+docker-compose exec backend python -c "
+from backend.services.pii_detector import PIIDetector
+detector = PIIDetector()
+print('PII Detector initialized')
+"
 ```
 
-### Data Protection
+### Integration Testing
 
-- PII is automatically detected and redacted
-- Documents stored in encrypted MinIO
-- Audit trail maintained in PostgreSQL
-- DPDP Act compliance enabled
-- Access controls implemented
+```bash
+# Test database connection
+docker-compose exec backend python -c "
+from backend.core.database import get_db_engine
+engine = get_db_engine()
+print('Database connected')
+"
 
----
-
-## ❓ FAQ
-
-### General
-
-**Q: What document types are supported?**  
-A: PDF (text & scanned), DOCX, PNG, JPG. Max 10MB per file.
-
-**Q: Is this production-ready?**  
-A: Yes. Circuit breakers, rate limiting, retry logic, audit logging included.
-
-**Q: Can I use this without OpenMetadata?**  
-A: Yes, system gracefully degrades if OM unavailable.
-
-### PII Detection
-
-**Q: What's the detection accuracy?**  
-A: Aadhaar 95%+, PAN 98%, DL 90%, Email/Phone 99%. False positive <2%.
-
-**Q: Does it support Indian language documents?**  
-A: OCR supports Hindi, Tamil, Telugu with Tesseract language packs.
-
-**Q: Can I add custom PII patterns?**  
-A: Yes, extend `backend/services/indian_id_recognizer.py`.
-
-### Risk Scoring
-
-**Q: Why does single Aadhaar score HIGH not LOW?**  
-A: Aadhaar is a biometric national ID (25.0 weight + 1.5× boost = always ≥HIGH).
-
-**Q: Can I customize risk thresholds?**  
-A: Yes, modify `pii_detector.py` `_derive_risk_band()` method.
-
-### Compliance
-
-**Q: Is this DPDP Act compliant?**  
-A: Yes. Automatic policy assignment, redaction tracking, audit logging.
-
-**Q: How long are audit logs retained?**  
-A: Indefinitely in PostgreSQL. Set retention policy per compliance requirements.
-
-**Q: Can I encrypt documents in storage?**  
-A: Yes. MinIO supports server-side encryption (enable in docker-compose.yml).
-
-### MCP & AI Agents
-
-**Q: How do I connect an AI agent?**  
-A: Start MCP server: `python mcp-server/server.py`. Claude/ChatGPT can then query 3 tools.
-
-**Q: What's the latency of MCP queries?**  
-A: 100-200ms typical (direct DB queries, no file I/O).
-
-**Q: Can I add more MCP tools?**  
-A: Yes, extend `mcp-server/server.py` with custom tool definitions.
+# Test MinIO connection
+docker-compose exec backend python -c "
+from backend.core.storage import get_storage_client
+client = get_storage_client()
+print('MinIO connected')
+"
+```
 
 ---
 
 ## 📁 Project Structure
 
 ```
-open-meta-data/
-├── README.md                    # This file
-├── .env.example                 # Configuration template
-├── docker-compose.yml           # Full stack orchestration
-├── pyproject.toml               # Python project metadata
-├── setup.sh                      # Quick startup script
-│
-├── backend/                      # FastAPI application
-│   ├── main.py                   # Entry point
-│   ├── requirements.txt          # Python dependencies
-│   ├── Dockerfile                # Multi-stage build
-│   ├── api/                      # REST endpoints
-│   │   ├── routes/               # Upload, status, risk, redact
-│   │   ├── auth.py               # JWT authentication
-│   │   ├── middleware.py         # CORS, rate limiting
-│   │   └── schemas.py            # Request/response models
-│   ├── services/                 # Business logic
-│   │   ├── pii_detector.py       # Risk scoring
-│   │   ├── indian_id_recognizer.py # Custom patterns
-│   │   ├── document_processor.py  # OCR + text extraction
-│   │   ├── redaction_engine.py   # Redaction logic
-│   │   └── om_integration.py     # OpenMetadata client
-│   ├── models/                   # SQLAlchemy ORM
-│   ├── core/                     # Database, storage, config
-│   ├── tasks/                    # Celery async tasks
-│   ├── tests/                    # Unit & integration tests
-│   └── alembic/                  # Database migrations
-│
-├── frontend/                     # Next.js React app
-│   ├── app/                      # Next.js 13+ app directory
-│   ├── components/               # Reusable React components
-│   ├── lib/                      # Utilities (API, store)
-│   ├── types/                    # TypeScript definitions
-│   ├── package.json              # Node dependencies
-│   └── Dockerfile                # Next.js build
-│
-├── mcp-server/                   # Model Context Protocol server
-│   ├── server.py                 # MCP tool definitions
-│   ├── test_mcp.py               # MCP tests
-│   └── README.md                 # MCP documentation
-│
-├── docker/                       # Docker utilities
-│   └── init-db.sql               # PostgreSQL schema
-│
-├── docs/                         # Additional documentation
-│   └── samples/                  # Sample documents
-│
-└── .gitignore                    # Git ignore patterns
+Morolo/
+├── backend/                 # FastAPI application
+│   ├── api/                 # REST endpoints
+│   ├── services/            # Business logic
+│   ├── models/              # Database models
+│   ├── tasks/               # Celery tasks
+│   └── tests/               # Unit tests
+├── frontend/                # Next.js UI (basic)
+├── mcp-server/              # MCP interface (experimental)
+├── docker-compose.yml       # Application services
+├── docker-compose-postgres.yml  # OpenMetadata stack
+└── .env.example             # Configuration template
 ```
 
 ---
 
 ## 🤝 Contributing
 
+This is a hackathon project. Contributions welcome but note the limitations above.
+
 1. Fork the repository
-2. Create feature branch: `git checkout -b feature/your-feature`
-3. Commit changes: `git commit -am 'Add feature'`
-4. Push branch: `git push origin feature/your-feature`
-5. Create Pull Request
-
-### Code Standards
-
-- Python: Follow PEP 8 (enforced with ruff, black)
-- Type hints: Required for all functions
-- Tests: Minimum 80% coverage
-- Documentation: Comprehensive docstrings
-
----
-
-## 📄 License
-
-MIT License - See [LICENSE](LICENSE) file for details
-
----
-
-## 🏆 Submission Details
-
-### Problem Solved
-
-"Indian enterprises lack a unified system to automatically detect unstructured PII (Aadhaar, PAN, Driving License) in user-uploaded documents, calculate compliance risk, redact sensitive information, and enable AI agents to query governance rules safely."
-
-### Key Highlights
-
-🏆 **First Complete Indian Government ID PII Detection for OpenMetadata**  
-🏆 **Only Submission with AI-Agent (MCP) Interface**  
-🏆 **Properly Calibrated Risk Scoring (Not LOW for Government IDs)**  
-🏆 **Production-Ready with Enterprise-Grade Features**  
-🏆 **DPDP Act Aligned (First Compliance-Focused Solution)**  
-
-### What You'll See in Demo
-
-1. Upload PDF with PII (Aadhaar, PAN, DL, Email, Phone)
-2. Instant response: risk_band = CRITICAL, risk_score = 100.0
-3. OpenMetadata UI: Container entity with classifications
-4. MCP query: "Show all CRITICAL documents" via AI agent
-5. Redacted document: All PII replaced with [REDACTED]
-
----
-
-## 📞 Support
-
-For issues, questions, or feature requests:
-
-1. Review error logs: `docker-compose logs [service]`
-2. Check health: `curl http://localhost:8000/health`
-3. Create GitHub issue with detailed description
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
 ---
 
@@ -729,10 +402,26 @@ For issues, questions, or feature requests:
 
 MIT License - See LICENSE file for details
 
-## 🤝 Contributing
+---
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## 🙏 Acknowledgments
+
+- **Microsoft Presidio** - PII detection framework
+- **OpenMetadata** - Metadata governance platform
+- **Tesseract** - OCR engine
+- **FastAPI** - Web framework
 
 ---
 
-**Morolo** - Enterprise PII Governance for Indian Documents
+## 📞 Support
+
+For issues or questions:
+- Check logs: `docker-compose logs [service]`
+- Review troubleshooting section above
+- Create GitHub issue with details
+
+---
+
+**Morolo** - PII Governance for Indian Documents
+
+*Note: This is a proof-of-concept project developed for a hackathon. It demonstrates PII detection and OpenMetadata integration but is not production-ready.*
